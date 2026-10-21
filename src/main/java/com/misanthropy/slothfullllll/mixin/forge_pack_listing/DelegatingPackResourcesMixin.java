@@ -1,0 +1,31 @@
+package com.misanthropy.slothfullllll.mixin.forge_pack_listing;
+
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
+import net.minecraft.server.packs.PackResources;
+import net.minecraft.server.packs.PackType;
+import net.minecraftforge.resource.DelegatingPackResources;
+import org.spongepowered.asm.mixin.Final;
+import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.Shadow;
+import org.spongepowered.asm.mixin.injection.At;
+import org.spongepowered.asm.mixin.injection.Redirect;
+
+@Mixin(DelegatingPackResources.class)
+public abstract class DelegatingPackResourcesMixin {
+    @Shadow(remap = false)
+    @Final
+    private Map<String, List<PackResources>> namespacesAssets;
+
+    @Shadow(remap = false)
+    @Final
+    private Map<String, List<PackResources>> namespacesData;
+
+    @Redirect(method = "listResources", at = @At(value = "FIELD", remap = false,
+            target = "Lnet/minecraftforge/resource/DelegatingPackResources;delegates:Ljava/util/List;"))
+    private List<PackResources> slothfullllll$packsWithNamespace(DelegatingPackResources self, PackType type, String namespace) {
+        List<PackResources> packs = (type == PackType.CLIENT_RESOURCES ? this.namespacesAssets : this.namespacesData).get(namespace);
+        return packs == null ? Collections.emptyList() : packs;
+    }
+}
