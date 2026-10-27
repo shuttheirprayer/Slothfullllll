@@ -111,7 +111,7 @@ final class ModuleGraphFix {
         return writer.toByteArray();
     }
 
-    private static Instrumentation instrumentation() throws Throwable {
+    static Instrumentation instrumentation() throws Throwable {
         ClassLoader system = ClassLoader.getSystemClassLoader();
         Class<?> agent;
         try {
@@ -151,7 +151,7 @@ final class ModuleGraphFix {
         return instrumentation;
     }
 
-    private static MethodHandles.Lookup implLookup() throws NoSuchFieldException {
+    static MethodHandles.Lookup implLookup() throws NoSuchFieldException {
         return (MethodHandles.Lookup) Unsafes.getStatic(MethodHandles.Lookup.class, "IMPL_LOOKUP");
     }
 

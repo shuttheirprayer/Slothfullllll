@@ -11,7 +11,8 @@ import java.util.Properties;
 final class Config {
     static final Path FILE = Path.of("config", "slothfullllll.properties");
     private static final List<String> KEYS = List.of(
-            "module_graph", "mixin_config_lookup", "forge_pack_listing",
+            "module_graph", "mixin_config_lookup", "mixin_opcode_names", "nested_jar_cache", "forge_pack_listing",
+            "jar_packages", "union_fs_open", "parallel_mod_scan", "mixin_target_index", "skip_bytecode_verification", "class_prefetch",
             "kiwi", "toomanyplayers", "jitl", "iceandfire", "nuclearcraft", "prism");
     private static final Properties VALUES = load();
 
@@ -20,6 +21,15 @@ final class Config {
 
     static boolean enabled(String key) {
         return !"false".equalsIgnoreCase(VALUES.getProperty(key, "true").trim());
+    }
+
+    static synchronized void disable(String key) {
+        VALUES.setProperty(key, "false");
+        try (Writer writer = Files.newBufferedWriter(FILE)) {
+            VALUES.store(writer, "Slothfullllll features. Set a key to false to turn that feature off.");
+        } catch (IOException e) {
+            SlothfullllllService.LOGGER.warn("Could not write {}", FILE, e);
+        }
     }
 
     private static Properties load() {
