@@ -12,6 +12,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.ProtectionDomain;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -20,6 +21,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.BooleanSupplier;
 
 final class ClassPrefetch implements ClassFileTransformer {
     private static final String LOADER = "cpw.mods.modlauncher.TransformingClassLoader";
@@ -30,35 +32,56 @@ final class ClassPrefetch implements ClassFileTransformer {
     private static final String THREAD = "Slothfullllll prefetch";
     private static final String WORKER = "modloading-worker";
     private static final List<String> NEVER = List.of("org/spongepowered/", "com/llamalad7/", "com/bawnorton/", "/mixin/", "/mixins/");
+    private static final long LATE_WINDOW_MS = 15 * 60 * 1000L;
+    private static final int LATE_LIMIT = 60_000;
+    private static final int LATE_THREADS = 3;
+    private static final long CHECKPOINT_MS = 60_000L;
 
     private final Instrumentation instrumentation;
     private final Path file;
+    private final Path lateFile;
     private final List<String> previous;
+    private final List<String> previousLate;
+    private final boolean lateEnabled;
     private final ConcurrentLinkedQueue<String> seen = new ConcurrentLinkedQueue<>();
+    private final ConcurrentLinkedQueue<String> lateSeen = new ConcurrentLinkedQueue<>();
     private final Set<String> underLock = ConcurrentHashMap.newKeySet();
+    private final AtomicInteger lateCount = new AtomicInteger();
+    private final AtomicBoolean lateSaved = new AtomicBoolean();
     private Object mixinLock;
     private final AtomicBoolean started = new AtomicBoolean();
     private volatile boolean done;
+    private volatile boolean late;
+    private volatile boolean finished;
 
-    private ClassPrefetch(Instrumentation instrumentation, Path file, List<String> previous) {
+    private ClassPrefetch(Instrumentation instrumentation, Path file, Path lateFile, List<String> previous, List<String> previousLate, boolean lateEnabled) {
         this.instrumentation = instrumentation;
         this.file = file;
+        this.lateFile = lateFile;
         this.previous = previous;
+        this.previousLate = previousLate;
+        this.lateEnabled = lateEnabled;
     }
 
     static void install(String side) throws Throwable {
         Instrumentation instrumentation = ModuleGraphFix.instrumentation();
         Path file = Config.FILE.resolveSibling("slothfullllll-classes-" + side + ".txt");
-        List<String> previous = List.of();
-        if (Files.isRegularFile(file)) {
-            previous = Files.readAllLines(file, StandardCharsets.UTF_8);
-        }
-        instrumentation.addTransformer(new ClassPrefetch(instrumentation, file, previous), false);
+        Path lateFile = Config.FILE.resolveSibling("slothfullllll-classes-" + side + "-late.txt");
+        boolean lateEnabled = Config.enabled("late_class_prefetch");
+        instrumentation.addTransformer(new ClassPrefetch(instrumentation, file, lateFile, read(file), lateEnabled ? read(lateFile) : List.of(), lateEnabled), false);
+    }
+
+    private static List<String> read(Path path) throws IOException {
+        return Files.isRegularFile(path) ? Files.readAllLines(path, StandardCharsets.UTF_8) : List.of();
     }
 
     @Override
     public byte[] transform(ClassLoader loader, String name, Class<?> redefined, ProtectionDomain domain, byte[] bytes) {
-        if (done || redefined != null || name == null || loader == null || !LOADER.equals(loader.getClass().getName())) {
+        if (finished || redefined != null || name == null || loader == null || !LOADER.equals(loader.getClass().getName())) {
+            return null;
+        }
+        if (late) {
+            recordLate(name);
             return null;
         }
         if (mixinLock == null && (name.equals(START) || name.equals(SERVER_START))) {
@@ -66,12 +89,13 @@ final class ClassPrefetch implements ClassFileTransformer {
             if (mixinLock == null) {
                 SlothfullllllService.LOGGER.info("Class prefetch left off, the Mixin transformer lock was not found");
                 done = true;
+                finished = true;
                 instrumentation.removeTransformer(this);
                 return null;
             }
         }
         if (mixinLock != null && !started.get() && Thread.currentThread().getName().startsWith(WORKER) && started.compareAndSet(false, true)) {
-            prefetch(loader);
+            prefetch(loader, filter(previous, Set.of()), Math.max(1, Math.min(8, Runtime.getRuntime().availableProcessors() / 2)), file, () -> !done, "");
         }
         if (mixinLock != null && Thread.holdsLock(mixinLock)) {
             underLock.add(name);
@@ -80,10 +104,80 @@ final class ClassPrefetch implements ClassFileTransformer {
         }
         if (name.equals(CLIENT_END) || name.equals(SERVER_END)) {
             done = true;
-            instrumentation.removeTransformer(this);
             save();
+            if (lateEnabled && mixinLock != null) {
+                startLate(loader);
+            } else {
+                finished = true;
+                instrumentation.removeTransformer(this);
+            }
         }
         return null;
+    }
+
+    private void recordLate(String name) {
+        if (Thread.holdsLock(mixinLock)) {
+            underLock.add(name);
+        } else if (name.indexOf("$$") < 0 && prefetchable(name)) {
+            lateSeen.add(name);
+            if (lateCount.incrementAndGet() >= LATE_LIMIT) {
+                finishLate();
+            }
+        }
+    }
+
+    private void startLate(ClassLoader loader) {
+        Set<String> early = new HashSet<>(seen);
+        late = true;
+        List<String> names = filter(previousLate, early);
+        if (!names.isEmpty()) {
+            prefetch(loader, names, LATE_THREADS, lateFile, () -> !finished, " (after the title screen)");
+        }
+        Thread timer = new Thread(() -> {
+            long end = System.currentTimeMillis() + LATE_WINDOW_MS;
+            while (!finished && System.currentTimeMillis() < end) {
+                try {
+                    Thread.sleep(CHECKPOINT_MS);
+                } catch (InterruptedException e) {
+                    return;
+                }
+                if (!finished) {
+                    write(lateFile, lateList());
+                }
+            }
+            finishLate();
+        }, THREAD + " late timer");
+        timer.setDaemon(true);
+        timer.start();
+    }
+
+    private void finishLate() {
+        if (!lateSaved.compareAndSet(false, true)) {
+            return;
+        }
+        finished = true;
+        instrumentation.removeTransformer(this);
+        write(lateFile, lateList());
+    }
+
+    private List<String> lateList() {
+        Set<String> names = new LinkedHashSet<>(lateSeen);
+        names.addAll(previousLate);
+        names.removeAll(underLock);
+        names.removeAll(new HashSet<>(seen));
+        names.removeIf(name -> !prefetchable(name));
+        List<String> out = new ArrayList<>(names);
+        return out.size() > LATE_LIMIT ? new ArrayList<>(out.subList(0, LATE_LIMIT)) : out;
+    }
+
+    private List<String> filter(List<String> names, Set<String> skip) {
+        List<String> out = new ArrayList<>(names.size());
+        for (String name : names) {
+            if (prefetchable(name) && !skip.contains(name)) {
+                out.add(name);
+            }
+        }
+        return out;
     }
 
     private static boolean prefetchable(String name) {
@@ -117,30 +211,23 @@ final class ClassPrefetch implements ClassFileTransformer {
         throw new NoSuchFieldException(name);
     }
 
-    private void prefetch(ClassLoader loader) {
-        List<String> names = new ArrayList<>(previous.size());
-        for (String name : previous) {
-            if (prefetchable(name)) {
-                names.add(name);
-            }
-        }
+    private void prefetch(ClassLoader loader, List<String> names, int threads, Path list, BooleanSupplier keepGoing, String label) {
         if (names.isEmpty()) {
             return;
         }
-        Path marker = file.resolveSibling(file.getFileName() + ".running");
+        Path marker = list.resolveSibling(list.getFileName() + ".running");
         if (Files.exists(marker)) {
             try {
                 Files.deleteIfExists(marker);
             } catch (IOException ignored) {
             }
-            SlothfullllllService.LOGGER.warn("The last launch did not finish its class prefetch, loading classes on first use this time");
+            SlothfullllllService.LOGGER.warn("The last launch did not finish its class prefetch{}, loading those classes on first use this time", label);
             return;
         }
         try {
             Files.createFile(marker);
         } catch (IOException ignored) {
         }
-        int threads = Math.max(1, Math.min(8, Runtime.getRuntime().availableProcessors() / 2));
         AtomicInteger next = new AtomicInteger();
         AtomicInteger loaded = new AtomicInteger();
         AtomicInteger running = new AtomicInteger(threads);
@@ -148,7 +235,7 @@ final class ClassPrefetch implements ClassFileTransformer {
         for (int i = 0; i < threads; i++) {
             Thread thread = new Thread(() -> {
                 int index;
-                while (!done && (index = next.getAndIncrement()) < names.size()) {
+                while (keepGoing.getAsBoolean() && (index = next.getAndIncrement()) < names.size()) {
                     try {
                         Class.forName(names.get(index).replace('/', '.'), false, loader);
                         loaded.incrementAndGet();
@@ -160,10 +247,10 @@ final class ClassPrefetch implements ClassFileTransformer {
                         Files.deleteIfExists(marker);
                     } catch (IOException ignored) {
                     }
-                    SlothfullllllService.LOGGER.info("Prefetched {} of {} classes in {} ms", loaded.get(), names.size(),
+                    SlothfullllllService.LOGGER.info("Prefetched {} of {} classes{} in {} ms", loaded.get(), names.size(), label,
                             (System.nanoTime() - start) / 1_000_000);
                 }
-            }, THREAD + " " + i);
+            }, THREAD + (label.isEmpty() ? " " : " late ") + i);
             thread.setDaemon(true);
             thread.setPriority(Thread.MIN_PRIORITY);
             thread.start();
@@ -210,12 +297,15 @@ final class ClassPrefetch implements ClassFileTransformer {
         Set<String> names = new LinkedHashSet<>(seen);
         names.removeAll(underLock);
         names.removeIf(name -> !prefetchable(name));
-        List<String> out = new ArrayList<>(names);
+        write(file, new ArrayList<>(names));
+    }
+
+    private static void write(Path path, List<String> out) {
         Thread thread = new Thread(() -> {
             try {
-                Files.write(file, out, StandardCharsets.UTF_8);
+                Files.write(path, out, StandardCharsets.UTF_8);
             } catch (IOException e) {
-                SlothfullllllService.LOGGER.warn("Could not write {}", file, e);
+                SlothfullllllService.LOGGER.warn("Could not write {}", path, e);
             }
         }, THREAD + " save");
         thread.start();

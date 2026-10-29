@@ -12,7 +12,7 @@ final class Config {
     static final Path FILE = Path.of("config", "slothfullllll.properties");
     private static final List<String> KEYS = List.of(
             "module_graph", "mixin_config_lookup", "mixin_opcode_names", "nested_jar_cache", "forge_pack_listing",
-            "jar_packages", "union_fs_open", "parallel_mod_scan", "mixin_target_index", "skip_bytecode_verification", "class_prefetch",
+            "jar_packages", "union_fs_open", "parallel_mod_scan", "mixin_target_index", "skip_bytecode_verification", "class_prefetch", "late_class_prefetch",
             "kiwi", "toomanyplayers", "jitl", "iceandfire", "nuclearcraft", "prism");
     private static final Properties VALUES = load();
 
