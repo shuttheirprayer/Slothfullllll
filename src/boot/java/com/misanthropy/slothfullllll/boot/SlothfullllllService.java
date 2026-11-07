@@ -35,6 +35,13 @@ public final class SlothfullllllService implements ITransformationService {
                 LOGGER.warn("Module graph speedup unavailable, modules will resolve the normal way instead..", t);
             }
         }
+        if (Config.enabled("lambda_form_pins")) {
+            try {
+                LambdaFormPins.apply();
+            } catch (Throwable t) {
+                LOGGER.warn("Lambda form pins unavailable, method handle forms are cached the normal way instead..", t);
+            }
+        }
         if (Config.enabled("jar_packages")) {
             try {
                 LoaderPatches.jarPackages();
